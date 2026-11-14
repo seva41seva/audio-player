@@ -438,7 +438,11 @@
           <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
           Скачать
         </button>
-        <button class="btn btn-sm" id="copyDirectBtn" type="button" title="Скопировать прямую ссылку">Копировать ссылку</button>
+        <button class="btn btn-sm" id="copyDirectBtn" type="button" title="Скопировать прямую ссылку">Копировать файл</button>
+        <button class="btn btn-sm" id="sharePlayerBtn" type="button" title="Ссылка на плеер с этой папкой — можно отправить другу">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M18 16.1a3 3 0 0 0-2 .8l-7.1-4.2a3 3 0 0 0 0-1.4L16 7.1a3 3 0 1 0-1-2.1c0 .2 0 .4.1.6L8 9.8a3 3 0 1 0 0 4.4l7.1 4.2c0 .2-.1.4-.1.6a3 3 0 1 0 3-3z"/></svg>
+          Поделиться
+        </button>
       </div>
     </div>
 
@@ -553,6 +557,10 @@
       <h2 id="folderTitle">📁 Папка</h2>
       <span class="folder-count" id="folderCount"></span>
       <span class="spacer"></span>
+      <button class="btn btn-sm" type="button" id="folderShareBtn" title="Скопировать ссылку на плеер с этой папкой">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M18 16.1a3 3 0 0 0-2 .8l-7.1-4.2a3 3 0 0 0 0-1.4L16 7.1a3 3 0 1 0-1-2.1c0 .2 0 .4.1.6L8 9.8a3 3 0 1 0 0 4.4l7.1 4.2c0 .2-.1.4-.1.6a3 3 0 1 0 3-3z"/></svg>
+        Поделиться
+      </button>
       <button class="btn btn-sm hidden" type="button" id="folderBackBtn">← Назад</button>
       <button class="btn btn-sm" type="button" id="folderRefreshBtn">↻ Обновить</button>
     </div>
@@ -799,6 +807,109 @@
   function escapeHtml(s){
     return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
   }
+  // ---------- «одна ссылка»: плеер + папка/файл Яндекс Диска ----------
+  const SHARE_PARAM = "url";
+  // Достаём ссылку из ?url=, ?u=, ?folder=, ?public_key=, из хеша (#url= или #<ссылка>)
+  function getSharedTarget(){
+    let u = null;
+    try{
+      const params = new URLSearchParams(location.search);
+      u = params.get("url") || params.get("u") || params.get("folder") ||
+          params.get("public_key") || params.get("link") || params.get("src");
+    }catch(e){}
+    if (!u && location.hash && location.hash.length > 1){
+      const raw = location.hash.slice(1);
+      try{
+        const hp = new URLSearchParams(raw);
+        u = hp.get("url") || hp.get("u") || null;
+      }catch(e){}
+      if (!u){
+        let dec = raw;
+        try{ dec = decodeURIComponent(raw); }catch(e){}
+        if (/^https?:\/\//i.test(dec)) u = dec;
+      }
+    }
+    if (!u) return null;
+    u = String(u).trim();
+    // Ссылка могла быть закодирована дважды
+    try{
+      if (/%3A%2F%2F/i.test(u)) u = decodeURIComponent(u);
+    }catch(e){}
+    u = u.trim();
+    // Если пришло без протокола (disk.yandex.ru/d/…)
+    if (!/^https?:\/\//i.test(u) && /^(disk\.yandex\.|yadi\.sk|ya\.cc)/i.test(u)) u = "https://" + u;
+    return u;
+  }
+  // Если вставили нашу же «объединённую» ссылку — вытаскиваем из неё ссылку на Диск
+  function unwrapOwnLink(raw){
+    const s = String(raw || "").trim();
+    if (!/^https?:/i.test(s)) return s;
+    try{
+      const u = new URL(s);
+      const sameSite = u.origin + u.pathname === location.origin + location.pathname;
+      const looksLikeUs = /\.github\.io$/i.test(u.hostname) || u.hostname === location.hostname;
+      if (sameSite || (looksLikeUs && u.searchParams.has(SHARE_PARAM))){
+        const inner = u.searchParams.get(SHARE_PARAM) || u.searchParams.get("u");
+        if (inner && isYandexLink(inner)) return inner;
+      }
+    }catch(e){}
+    return s;
+  }
+  // Ссылка вида https://site/audio-player/?url=<папка или файл>
+  function buildShareLink(target){
+    const base = location.origin + location.pathname;
+    const clean = target ? cleanYandexUrl(target) : "";
+    return base + "?" + SHARE_PARAM + "=" + encodeURIComponent(clean);
+    }
+  // Держим адресную строку в актуальном состоянии: скопировал из браузера — уже готовая ссылка
+  function syncShareParam(target){
+    try{
+      if (!/^https?:/i.test(location.protocol)) return; // file:// — не трогаем
+      const q = target ? ("?" + SHARE_PARAM + "=" + encodeURIComponent(cleanYandexUrl(target))) : "";
+      const next = location.pathname + q + location.hash;
+      if (next !== location.pathname + location.search + location.hash){
+        history.replaceState(history.state, "", next);
+      }
+    }catch(e){}
+  }
+  // Какую ссылку показывать в «Поделиться»: папка текущего файла либо сам файл
+  function shareTargetNow(){
+    if (currentFolder && currentFolder.folderUrl) return currentFolder.folderUrl;
+    if (currentUrl && isFolderFileKey(currentUrl)) return parseFolderFileKey(currentUrl).folderUrl;
+    if (currentUrl && isYandexLink(currentUrl)) return currentUrl;
+    return null;
+  }
+  async function copyTextToClipboard(text){
+    try{
+      if (navigator.clipboard && navigator.clipboard.writeText){
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    }catch(e){}
+    try{
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand("copy");
+      ta.remove();
+      return ok;
+    }catch(e){ return false; }
+  }
+  async function shareCurrent(){
+    const target = shareTargetNow();
+    const link = buildShareLink(target || "https://disk.yandex.ru/");
+    const ok = await copyTextToClipboard(link);
+    if (ok){
+      toast("Ссылка на плеер скопирована — можно отправлять");
+    }else{
+      // Нет доступа к буферу (http, старый браузер) — показываем текст
+      window.prompt("Скопируйте ссылку:", link);
+    }
+  }
+
   function isYandexLink(url){
     if (!url) return false;
     const u = url.toLowerCase();
@@ -1007,7 +1118,8 @@
   // ---------- open track ----------
   async function openTrack(rawUrl, opts){
     opts = opts || {};
-    const url = (rawUrl || "").trim();
+    // Если вставили нашу «объединённую» ссылку (?url=…) — берём из неё ссылку на Диск
+    const url = unwrapOwnLink((rawUrl || "").trim());
     if (!url){ toast("Вставьте ссылку на файл", true); return; }
     // Нормализация: если нет протокола — добавить https
     let norm = url;
@@ -1133,6 +1245,8 @@
       });
 
       settings.lastUrl = norm; saveSettings(settings);
+      // Для одиночного файла с Диска — тоже обновляем адресную строку
+      if (!folderUrlForTrack && isYandexLink(norm)) syncShareParam(norm);
 
       // Контекст папки: для одиночных файлов скрываем плейлист,
       // для файлов из папки — показываем/восстанавливаем список
@@ -1233,6 +1347,8 @@
       };
       persistFolder();
       renderPlaylist();
+      // Адресная строка всегда содержит ссылку на эту папку — её можно просто скопировать
+      syncShareParam(clean);
       // Вход в подпапку — состояние для аппаратной кнопки «назад» на Android
       if (targetPath !== "/" && !opts.fromHistory) pushFolderHistory(targetPath);
       const audios = folderAudioItems();
@@ -1741,15 +1857,9 @@
   });
   $("#copyDirectBtn").addEventListener("click", async () => {
     if (!currentHref){ toast("Сначала откройте файл", true); return; }
-    try{ await navigator.clipboard.writeText(currentHref); toast("Прямая ссылка скопирована"); }
-    catch(e){
-      // fallback
-      const ta = document.createElement("textarea");
-      ta.value = currentHref; document.body.appendChild(ta); ta.select();
-      try{ document.execCommand("copy"); toast("Прямая ссылка скопирована"); }
-      catch(err){ toast("Не удалось скопировать", true); }
-      ta.remove();
-    }
+    const ok = await copyTextToClipboard(currentHref);
+    if (ok) toast("Прямая ссылка на файл скопирована");
+    else window.prompt("Скопируйте ссылку:", currentHref);
   });
 
   // Jump to time
@@ -1994,6 +2104,12 @@
     openFolder(currentFolder.folderUrl, currentFolder.currentPath || "/", {fromHistory: true});
   });
 
+  // «Поделиться»: копируем ссылку на плеер с открытой папкой
+  const folderShareBtn = $("#folderShareBtn");
+  if (folderShareBtn) folderShareBtn.addEventListener("click", shareCurrent);
+  const sharePlayerBtn = $("#sharePlayerBtn");
+  if (sharePlayerBtn) sharePlayerBtn.addEventListener("click", shareCurrent);
+
   // ---------- Android / мобильный режим ----------
   // 1) Мини-плеер внизу экрана, когда основной плеер прокручен из вида
   let miniVisible = false;
@@ -2216,11 +2332,10 @@
     if (h) setTimeout(() => h.closest(".card").scrollIntoView({behavior:"smooth", block:"start"}), 200);
   }
   try{
-    const params = new URLSearchParams(location.search);
-    const u = params.get("url") || params.get("u");
-    if (u){
-      urlInput.value = u;
-      openTrack(u);
+    const shared = getSharedTarget();
+    if (shared){
+      urlInput.value = shared;
+      openTrack(shared);
     } else if (settings.lastUrl){
       // Не открываем автоматически, но показываем подсказку в истории
       // (чтобы не грузить большой файл без действия пользователя)
