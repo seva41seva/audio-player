@@ -1,5 +1,5 @@
 /* Service worker: оболочка приложения кэшируется, аудио и API Яндекса — всегда из сети. */
-const CACHE = "yd-audio-player-v1";
+const CACHE = "yd-audio-player-v2";
 const SHELL = [
   "./",
   "./index.html",
@@ -32,7 +32,7 @@ self.addEventListener("fetch", (event) => {
   // Аудио, прямые ссылки и API Яндекс Диска не кэшируем (нужны актуальные токены)
   const isMedia = req.destination === "audio" || req.destination === "video" ||
     /\.(mp3|m4a|aac|ogg|oga|opus|wav|flac|webm)(\?|$)/i.test(url.pathname);
-  const isApi = /cloud-api\.yandex\.net|downloader\.disk\.yandex\.ru|disk\.yandex\.|yadi\.sk/.test(url.hostname + url.pathname);
+  const isApi = /cloud-api\.yandex\.net|downloader\.disk\.yandex\.ru|storage\.yandex\.|disk\.yandex\.|yadi\.sk/.test(url.hostname + url.pathname);
   const isProxy = /corsproxy\.io|allorigins|codetabs\.com/.test(url.hostname);
   if (isMedia || isApi || isProxy) return;
 

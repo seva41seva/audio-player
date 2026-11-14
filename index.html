@@ -3,6 +3,10 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, maximum-scale=5.0">
+<!-- ВАЖНО: Яндекс Диск отдаёт 403 на прямые ссылки, если запрос пришёл с чужим Referer
+     (например, с https://user.github.io/...). Политика no-referrer обязательна,
+     иначе аудио не воспроизводится на хостингах вроде GitHub Pages. -->
+<meta name="referrer" content="no-referrer">
 <meta name="theme-color" content="#0f1115">
 <meta name="color-scheme" content="dark">
 <meta name="mobile-web-app-capable" content="yes">
@@ -539,7 +543,8 @@
       <div class="bm-list" id="bmList"><span class="empty">Меток пока нет. Нажмите «Метка», чтобы сохранить момент.</span></div>
     </div>
 
-    <audio id="audio" preload="metadata" playsinline></audio>
+    <!-- referrerpolicy: без него Яндекс отвечает 403 на хостингах (GitHub Pages) -->
+    <audio id="audio" preload="metadata" playsinline referrerpolicy="no-referrer"></audio>
   </section>
 
   <!-- FOLDER / PLAYLIST -->
@@ -597,6 +602,7 @@
         <h3>ℹ️ Как это работает</h3>
         <ul>
           <li>Плеер использует официальный API Яндекс Диска для публичных ссылок и не скачивает файл целиком — перемотка работает сразу.</li>
+          <li>Плеер отключает заголовок Referer: Яндекс отдаёт <b>403</b> на запросы с чужого сайта, поэтому без этого аудио не играло бы на GitHub Pages и других хостингах.</li>
           <li>Позиция сохраняется каждые 3 секунды и при закрытии вкладки.</li>
           <li>Если файл очень большой, первое открытие может занять несколько секунд.</li>
           <li>Никаких паролей и токенов не требуется — только публичная ссылка.</li>
@@ -711,6 +717,7 @@
   let resumeApplied = false;  // перемотка уже выполнена
   let resumeToastShown = false;
   let loadGuardTimer = null;
+  let linkRetried = false;   // прямая ссылка уже обновлялась для текущего трека
   // Контекст папки: {folderUrl, folderName, currentPath, items:[{name,path,type,size,mime_type}]}
   let currentFolder = null;
   let currentFolderName = null; // имя папки для текущего файла (для отображения)
@@ -858,7 +865,9 @@
   function fetchWithTimeout(url, ms){
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), ms || 12000);
-    return fetch(url, {signal: ctrl.signal}).finally(() => clearTimeout(t));
+    // referrerPolicy обязателен: с чужим Referer Яндекс отвечает 403
+    return fetch(url, {signal: ctrl.signal, referrerPolicy: "no-referrer", credentials: "omit"})
+      .finally(() => clearTimeout(t));
   }
   async function fetchJsonWithFallback(apiUrl){
     const proxies = [
@@ -1030,6 +1039,7 @@
     resumeTarget = null;
     resumeApplied = false;
     resumeToastShown = false;
+    linkRetried = false;
     clearTimeout(loadGuardTimer);
     // Страховка: если seek так и не завершится, снять защиту через 30 сек
     loadGuardTimer = setTimeout(() => { isLoading = false; }, 30000);
@@ -1484,6 +1494,7 @@
     updateMediaSessionState();
     requestWakeLock();
     updateMini();
+    linkRetried = false; // файл заиграл — следующий сбой снова можно чинить
   });
   audio.addEventListener("pause", () => {
     playIcon.classList.remove("hidden"); pauseIcon.classList.add("hidden");
@@ -1515,14 +1526,53 @@
     }
     toast("Прослушивание завершено");
   });
-  audio.addEventListener("error", () => {
+  // Прямая ссылка Яндекса живёт несколько часов. Если браузер получил 403/404 —
+  // молча запрашиваем свежую ссылку и продолжаем с того же места.
+  async function refreshDirectLinkAndRetry(){
+    if (linkRetried) return false;
+    if (!currentUrl || currentUrl.startsWith("blob:")) return false;
+    linkRetried = true;
+    const pos = audio.currentTime || 0;
+    try{
+      let href = null;
+      if (isFolderFileKey(currentUrl)){
+        const p = parseFolderFileKey(currentUrl);
+        const r = await resolveFolderFile(p.folderUrl, p.filePath);
+        href = r.href;
+      } else if (isYandexLink(currentUrl)){
+        const r = await resolveYandex(currentUrl);
+        href = r.href;
+      }
+      if (!href) return false;
+      currentHref = href;
+      resumeTarget = pos > 5 ? pos : null;
+      resumeApplied = false;
+      resumeToastShown = false;
+      isLoading = true;
+      clearTimeout(loadGuardTimer);
+      loadGuardTimer = setTimeout(() => { isLoading = false; }, 30000);
+      audio.src = href;
+      audio.load();
+      const wasPlaying = !audio.paused;
+      if (wasPlaying) audio.play().catch(() => {});
+      toast("Обновили ссылку на файл, продолжаем");
+      return true;
+    }catch(e){
+      return false;
+    }
+  }
+
+  audio.addEventListener("error", async () => {
     isLoading = false;
     resumeTarget = null;
     clearTimeout(loadGuardTimer);
     if (!currentHref) return;
     // Не показываем ошибку при пустом src
     if (!audio.src) return;
-    setStatus('<span>⚠</span><span>Не удалось воспроизвести файл. Возможно, ссылка устарела или доступ закрыт. Попробуйте открыть ссылку заново.</span>', "error");
+    setStatus('<span>⚠</span><span>Ссылка не открылась. Пробуем получить новую…</span>');
+    const ok = await refreshDirectLinkAndRetry();
+    if (ok) return;
+    setStatus('<span>⚠</span><span>Не удалось воспроизвести файл: ссылка устарела или доступ закрыт. Откройте ссылку заново.</span>', "error");
   });
   audio.addEventListener("waiting", () => { /* можно показать спиннер, но не обязательно */ });
   audio.addEventListener("seeked", () => {
@@ -1678,8 +1728,16 @@
   });
 
   $("#downloadBtn").addEventListener("click", () => {
-    if (currentHref) window.open(currentHref, "_blank", "noopener");
-    else toast("Сначала откройте файл", true);
+    if (!currentHref){ toast("Сначала откройте файл", true); return; }
+    // noreferrer: иначе Яндекс отдаёт 403 при переходе по ссылке с чужого сайта
+    const a = document.createElement("a");
+    a.href = currentHref;
+    a.target = "_blank";
+    a.rel = "noopener noreferrer";
+    a.referrerPolicy = "no-referrer";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
   });
   $("#copyDirectBtn").addEventListener("click", async () => {
     if (!currentHref){ toast("Сначала откройте файл", true); return; }
